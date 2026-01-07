@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloth Physics Simulation</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #container {
+            display: flex;
+            height: 100vh;
+        }
+
+        #simulation-container {
+            flex: 1;
+            position: relative;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        }
+
+        #control-panel {
+            width: 320px;
+            background-color: #f8f9fa;
+            border-left: 2px solid #dee2e6;
+            padding: 15px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .control-group {
+            margin-bottom: 12px;
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .control-group label {
+            font-weight: 600;
+            color: #495057;
+            margin-bottom: 6px;
+            display: block;
+            font-size: 0.9em;
+        }
+
+        .control-group .form-range {
+            width: 100%;
+        }
+
+        .value-display {
+            font-size: 0.85em;
+            color: #6c757d;
+            text-align: right;
+            margin-top: 2px;
+        }
+
+        .btn-action {
+            padding: 10px 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        #run-btn {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            border: none;
+            font-size: 1.1em;
+        }
+
+        #run-btn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #218838 0%, #1aa179 100%);
+        }
+
+        #run-btn:disabled {
+            background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+            opacity: 0.7;
+        }
+
+        #pause-btn {
+            background: linear-gradient(135deg, #ffc107 0%, #fd7e14 100%);
+            border: none;
+            color: #212529;
+        }
+
+        #reset-btn {
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+            border: none;
+        }
+
+        h5 {
+            color: #343a40;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 8px;
+            margin-bottom: 12px;
+            font-size: 1.1em;
+        }
+
+        .form-control:disabled, .form-range:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="simulation-container"></div>
+
+        <div id="control-panel">
+            <h5>Cloth Physics Controls</h5>
+
+            <button id="run-btn" class="btn btn-success btn-action w-100">
+                ▶ Run Simulation
+            </button>
+
+            <button id="pause-btn" class="btn btn-warning btn-action w-100" disabled>
+                ⏸ Pause
+            </button>
+
+            <button id="reset-btn" class="btn btn-danger btn-action w-100">
+                ↺ Reset All
+            </button>
+
+            <div class="control-group">
+                <label for="squares-slider">Squares per Side</label>
+                <input type="range" class="form-range" id="squares-slider"
+                       min="2" max="40" value="2">
+                <div class="value-display" id="squares-value">2 (4 total squares)</div>
+            </div>
+
+            <div class="control-group">
+                <label for="points-slider">Number of Points</label>
+                <input type="range" class="form-range" id="points-slider"
+                       min="1" max="40" value="3">
+                <div class="value-display" id="points-value">3</div>
+            </div>
+
+            <div class="control-group">
+                <label for="roughness-slider">Cloth Roughness</label>
+                <input type="range" class="form-range" id="roughness-slider"
+                       min="0" max="100" value="50">
+                <div class="value-display" id="roughness-value">50% (Medium grip)</div>
+            </div>
+
+            <div class="control-group">
+                <label for="fps-slider">Frames per Second</label>
+                <input type="range" class="form-range" id="fps-slider"
+                       min="10" max="120" value="60">
+                <div class="value-display" id="fps-value">60 FPS</div>
+            </div>
+
+            <div class="control-group">
+                <label for="gravity-slider">Gravity</label>
+                <input type="range" class="form-range" id="gravity-slider"
+                       min="0" max="30" value="2" step="0.1">
+                <div class="value-display" id="gravity-value">2.00 m/s²</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== CONFIGURATION ====================
+        const CONFIG = {
+            clothSize: 8,
+            simBounds: {
+                x: [-6, 6],
+                y: [-6, 6],
+                z: [-6, 6]
+            },
+            iterations: 5,
+            damping: 0.98,
+            pointRadius: 0.3,
+            substeps: 4,
+            settlementThreshold: 0.001,
+            settlementFrames: 60
+        };
+
+        // ==================== GLOBAL STATE ====================
+        let scene, camera, renderer;
+        let cloth = null;
+        let obstaclePoints = [];
+        let isRunning = false;
+        let isPaused = false;
+        let animationId = null;
+        let lastTime = 0;
+        let simTime = 0;
+        let settlementCounter = 0;
+
+        // ==================== CLOTH PHYSICS CLASS ====================
+        class ClothSimulation {
+            constructor(divisions, clothSize, roughness) {
+                this.divisions = divisions;
+                this.clothSize = clothSize;
+                this.roughness = roughness;
+                this.particles = [];
+                this.constraints = [];
+                this.squares = [];
+
+                this.initParticles();
+                this.initConstraints();
+            }
+
+            initParticles() {
+                const spacing = this.clothSize / this.divisions;
+                const startX = -this.clothSize / 2;
+                const startZ = -this.clothSize / 2;
+                const startY = CONFIG.simBounds.y[1] - 1; // Y is now vertical, start at top
+
+                for (let j = 0; j <= this.divisions; j++) {
+                    for (let i = 0; i <= this.divisions; i++) {
+                        this.particles.push({
+                            position: new THREE.Vector3(
+                                startX + i * spacing,
+                                startY,
+                                startZ + j * spacing
+                            ),
+                            previous: new THREE.Vector3(
+                                startX + i * spacing,
+                                startY,
+                                startZ + j * spacing
+                            ),
+                            velocity: new THREE.Vector3(0, 0, 0),
+                            mass: 1,
+                            pinned: false,
+                            contactPoint: null
+                        });
+                    }
+                }
+            }
+
+            initConstraints() {
+                const gridSize = this.divisions + 1;
+                const spacing = this.clothSize / this.divisions;
+                const diagSpacing = Math.sqrt(2) * spacing;
+
+                for (let j = 0; j <= this.divisions; j++) {
+                    for (let i = 0; i <= this.divisions; i++) {
+                        const idx = j * gridSize + i;
+
+                        if (i < this.divisions) {
+                            this.constraints.push({
+                                p1: idx,
+                                p2: idx + 1,
+                                restLength: spacing,
+                                type: 'structural'
+                            });
+                        }
+
+                        if (j < this.divisions) {
+                            this.constraints.push({
+                                p1: idx,
+                                p2: idx + gridSize,
+                                restLength: spacing,
+                                type: 'structural'
+                            });
+                        }
+
+                        if (i < this.divisions && j < this.divisions) {
+                            this.constraints.push({
+                                p1: idx,
+                                p2: idx + gridSize + 1,
+                                restLength: diagSpacing,
+                                type: 'shear'
+                            });
+                            this.constraints.push({
+                                p1: idx + 1,
+                                p2: idx + gridSize,
+                                restLength: diagSpacing,
+                                type: 'shear'
+                            });
+                        }
+                    }
+                }
+
+                for (let j = 0; j < this.divisions; j++) {
+                    for (let i = 0; i < this.divisions; i++) {
+                        const idx = j * gridSize + i;
+                        this.squares.push({
+                            indices: [
+                                idx,
+                                idx + 1,
+                                idx + gridSize + 1,
+                                idx + gridSize
+                            ]
+                        });
+                    }
+                }
+            }
+
+            simulate(dt, gravity, obstacles, roughness) {
+                const substepDt = dt / CONFIG.substeps;
+                let totalMovement = 0;
+
+                for (let substep = 0; substep < CONFIG.substeps; substep++) {
+                    for (const p of this.particles) {
+                        if (p.pinned) continue;
+
+                        const temp = p.position.clone();
+                        // Gravity pulls DOWN along Y axis (negative Y)
+                        const gravityForce = new THREE.Vector3(0, -gravity * substepDt * substepDt, 0);
+
+                        p.velocity.subVectors(p.position, p.previous);
+                        p.velocity.multiplyScalar(CONFIG.damping);
+
+                        p.position.add(p.velocity);
+                        p.position.add(gravityForce);
+
+                        p.previous.copy(temp);
+                    }
+
+                    for (let iter = 0; iter < CONFIG.iterations; iter++) {
+                        for (const c of this.constraints) {
+                            this.solveDistanceConstraint(c, 1.0);
+                        }
+                    }
+
+                    const frictionFactor = roughness / 100;
+
+                    for (const p of this.particles) {
+                        if (p.pinned) continue;
+
+                        for (const obs of obstacles) {
+                            const diff = new THREE.Vector3().subVectors(p.position, obs);
+                            const dist = diff.length();
+
+                            if (dist < CONFIG.pointRadius) {
+                                diff.normalize();
+                                p.position.copy(obs).add(diff.multiplyScalar(CONFIG.pointRadius));
+
+                                const velocity = new THREE.Vector3().subVectors(p.position, p.previous);
+                                const normalVelocity = diff.clone().multiplyScalar(velocity.dot(diff));
+                                const tangentVelocity = velocity.clone().sub(normalVelocity);
+
+                                tangentVelocity.multiplyScalar(1 - frictionFactor);
+
+                                const newVelocity = normalVelocity.add(tangentVelocity);
+                                p.previous.copy(p.position).sub(newVelocity);
+                            }
+                        }
+
+                        // Floor collision (Y is vertical, floor is at min Y)
+                        if (p.position.y < CONFIG.simBounds.y[0]) {
+                            p.position.y = CONFIG.simBounds.y[0];
+
+                            const velocity = new THREE.Vector3().subVectors(p.position, p.previous);
+                            velocity.x *= (1 - frictionFactor * 0.5);
+                            velocity.z *= (1 - frictionFactor * 0.5);
+                            p.previous.copy(p.position).sub(velocity);
+                        }
+
+                        // Boundary constraints
+                        p.position.x = Math.max(CONFIG.simBounds.x[0],
+                                       Math.min(CONFIG.simBounds.x[1], p.position.x));
+                        p.position.y = Math.max(CONFIG.simBounds.y[0],
+                                       Math.min(CONFIG.simBounds.y[1], p.position.y));
+                        p.position.z = Math.max(CONFIG.simBounds.z[0],
+                                       Math.min(CONFIG.simBounds.z[1], p.position.z));
+
+                        totalMovement += p.velocity.length();
+                    }
+                }
+
+                return totalMovement;
+            }
+
+            solveDistanceConstraint(constraint, stiffness) {
+                const p1 = this.particles[constraint.p1];
+                const p2 = this.particles[constraint.p2];
+
+                const diff = new THREE.Vector3().subVectors(p2.position, p1.position);
+                const currentLength = diff.length();
+
+                if (currentLength === 0) return;
+
+                const correction = (currentLength - constraint.restLength) / currentLength;
+                diff.multiplyScalar(0.5 * correction * stiffness);
+
+                if (!p1.pinned) {
+                    p1.position.add(diff);
+                }
+                if (!p2.pinned) {
+                    p2.position.sub(diff);
+                }
+            }
+
+            getParticlePositions() {
+                return this.particles.map(p => p.position);
+            }
+        }
+
+        // ==================== THREE.JS SETUP ====================
+        function initThreeJS() {
+            const container = document.getElementById('simulation-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+
+            const aspect = width / height;
+            const frustumSize = 20;
+            camera = new THREE.OrthographicCamera(
+                -frustumSize * aspect / 2,
+                frustumSize * aspect / 2,
+                frustumSize / 2,
+                -frustumSize / 2,
+                0.1,
+                1000
+            );
+
+            // Isometric view: looking down from above-front-right
+            // Y is UP, so we position camera above and looking down
+            camera.position.set(12, 12, 12);
+            camera.lookAt(0, 0, 0);
+            camera.up.set(0, 1, 0); // Y is up
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+
+            const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+            directionalLight2.position.set(-10, 10, -10);
+            scene.add(directionalLight2);
+
+            addGridHelper();
+            addAxisIndicator();
+
+            window.addEventListener('resize', onWindowResize);
+
+            renderer.render(scene, camera);
+        }
+
+        function addGridHelper() {
+            // Floor grid at bottom (Y = min)
+            const gridHelper = new THREE.GridHelper(12, 12, 0x444444, 0x333333);
+            gridHelper.position.y = CONFIG.simBounds.y[0];
+            scene.add(gridHelper);
+
+            const boxGeometry = new THREE.BoxGeometry(
+                CONFIG.simBounds.x[1] - CONFIG.simBounds.x[0],
+                CONFIG.simBounds.y[1] - CONFIG.simBounds.y[0],
+                CONFIG.simBounds.z[1] - CONFIG.simBounds.z[0]
+            );
+            const boxEdges = new THREE.EdgesGeometry(boxGeometry);
+            const boxLine = new THREE.LineSegments(
+                boxEdges,
+                new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.5 })
+            );
+            boxLine.position.y = (CONFIG.simBounds.y[1] + CONFIG.simBounds.y[0]) / 2;
+            scene.add(boxLine);
+        }
+
+        function addAxisIndicator() {
+            const axisLength = 2;
+            const axisGroup = new THREE.Group();
+
+            // X axis (red) - goes right
+            const xGeom = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(axisLength, 0, 0)
+            ]);
+            const xLine = new THREE.Line(xGeom, new THREE.LineBasicMaterial({ color: 0xff0000 }));
+            axisGroup.add(xLine);
+
+            // Y axis (green) - goes UP (gravity falls along this axis)
+            const yGeom = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(0, axisLength, 0)
+            ]);
+            const yLine = new THREE.Line(yGeom, new THREE.LineBasicMaterial({ color: 0x00ff00 }));
+            axisGroup.add(yLine);
+
+            // Z axis (blue) - goes toward viewer
+            const zGeom = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(0, 0, axisLength)
+            ]);
+            const zLine = new THREE.Line(zGeom, new THREE.LineBasicMaterial({ color: 0x0088ff }));
+            axisGroup.add(zLine);
+
+            axisGroup.position.set(
+                CONFIG.simBounds.x[0] + 0.5,
+                CONFIG.simBounds.y[0] + 0.1,
+                CONFIG.simBounds.z[0] + 0.5
+            );
+            scene.add(axisGroup);
+        }
+
+        function onWindowResize() {
+            const container = document.getElementById('simulation-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            const aspect = width / height;
+            const frustumSize = 20;
+
+            camera.left = -frustumSize * aspect / 2;
+            camera.right = frustumSize * aspect / 2;
+            camera.top = frustumSize / 2;
+            camera.bottom = -frustumSize / 2;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(width, height);
+        }
+
+        // ==================== CLOTH MESH ====================
+        let clothMesh = null;
+        let clothWireframe = null;
+
+        function createClothMesh() {
+            if (!cloth) return;
+
+            removeClothMesh();
+
+            const divisions = cloth.divisions;
+            const gridSize = divisions + 1;
+            const positions = [];
+            const indices = [];
+
+            for (const p of cloth.particles) {
+                positions.push(p.position.x, p.position.y, p.position.z);
+            }
+
+            for (let j = 0; j < divisions; j++) {
+                for (let i = 0; i < divisions; i++) {
+                    const idx = j * gridSize + i;
+                    indices.push(idx, idx + 1, idx + gridSize + 1);
+                    indices.push(idx, idx + gridSize + 1, idx + gridSize);
+                }
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x4a90d9,
+                transparent: true,
+                opacity: 0.5,
+                side: THREE.DoubleSide,
+                shininess: 30
+            });
+
+            clothMesh = new THREE.Mesh(geometry, material);
+            scene.add(clothMesh);
+
+            const wireframeMaterial = new THREE.LineBasicMaterial({
+                color: 0x88bbff,
+                transparent: true,
+                opacity: 0.8
+            });
+            const wireframeGeometry = new THREE.WireframeGeometry(geometry);
+            clothWireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
+            scene.add(clothWireframe);
+        }
+
+        function removeClothMesh() {
+            if (clothMesh) {
+                scene.remove(clothMesh);
+                clothMesh.geometry.dispose();
+                clothMesh.material.dispose();
+                clothMesh = null;
+            }
+            if (clothWireframe) {
+                scene.remove(clothWireframe);
+                clothWireframe.geometry.dispose();
+                clothWireframe.material.dispose();
+                clothWireframe = null;
+            }
+        }
+
+        function updateClothMesh() {
+            if (!cloth || !clothMesh) return;
+
+            const positions = clothMesh.geometry.attributes.position.array;
+
+            for (let i = 0; i < cloth.particles.length; i++) {
+                positions[i * 3] = cloth.particles[i].position.x;
+                positions[i * 3 + 1] = cloth.particles[i].position.y;
+                positions[i * 3 + 2] = cloth.particles[i].position.z;
+            }
+
+            clothMesh.geometry.attributes.position.needsUpdate = true;
+            clothMesh.geometry.computeVertexNormals();
+
+            if (clothWireframe) {
+                scene.remove(clothWireframe);
+                clothWireframe.geometry.dispose();
+                const wireframeGeometry = new THREE.WireframeGeometry(clothMesh.geometry);
+                clothWireframe = new THREE.LineSegments(
+                    wireframeGeometry,
+                    new THREE.LineBasicMaterial({
+                        color: 0x88bbff,
+                        transparent: true,
+                        opacity: 0.8
+                    })
+                );
+                scene.add(clothWireframe);
+            }
+        }
+
+        // ==================== OBSTACLE POINTS ====================
+        let pointMeshes = [];
+
+        function createObstaclePoints(count) {
+            removeObstaclePoints();
+
+            for (let i = 0; i < count; i++) {
+                const x = CONFIG.simBounds.x[0] + Math.random() * (CONFIG.simBounds.x[1] - CONFIG.simBounds.x[0]);
+                // Y is vertical - place points in middle area, not at very top or bottom
+                const y = CONFIG.simBounds.y[0] + 2 + Math.random() * (CONFIG.simBounds.y[1] - CONFIG.simBounds.y[0] - 4);
+                const z = CONFIG.simBounds.z[0] + Math.random() * (CONFIG.simBounds.z[1] - CONFIG.simBounds.z[0]);
+
+                const point = new THREE.Vector3(x, y, z);
+                obstaclePoints.push(point);
+
+                const geometry = new THREE.SphereGeometry(0.15, 16, 16);
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0xff4444,
+                    emissive: 0x441111
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.copy(point);
+                scene.add(mesh);
+                pointMeshes.push(mesh);
+
+                const glowGeometry = new THREE.SphereGeometry(0.25, 16, 16);
+                const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xff6666,
+                    transparent: true,
+                    opacity: 0.3
+                });
+                const glowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
+                glowMesh.position.copy(point);
+                scene.add(glowMesh);
+                pointMeshes.push(glowMesh);
+            }
+        }
+
+        function removeObstaclePoints() {
+            for (const mesh of pointMeshes) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+            }
+            pointMeshes = [];
+            obstaclePoints = [];
+        }
+
+        // ==================== SIMULATION CONTROL ====================
+        function initSimulation() {
+            const divisions = parseInt(document.getElementById('squares-slider').value);
+            const pointCount = parseInt(document.getElementById('points-slider').value);
+            const roughness = parseInt(document.getElementById('roughness-slider').value);
+
+            // Clean up existing
+            removeClothMesh();
+            removeObstaclePoints();
+
+            cloth = new ClothSimulation(divisions, CONFIG.clothSize, roughness);
+            createObstaclePoints(pointCount);
+            createClothMesh();
+
+            renderer.render(scene, camera);
+        }
+
+        function startSimulation() {
+            if (isRunning) return;
+
+            // Always reinitialize with current settings
+            initSimulation();
+
+            isRunning = true;
+            isPaused = false;
+            simTime = 0;
+            lastTime = performance.now();
+            settlementCounter = 0;
+
+            setControlsEnabled(false);
+
+            document.getElementById('run-btn').disabled = true;
+            document.getElementById('pause-btn').disabled = false;
+            document.getElementById('pause-btn').textContent = '⏸ Pause';
+
+            animate();
+        }
+
+        function pauseSimulation() {
+            if (!isRunning) return;
+
+            isPaused = !isPaused;
+            document.getElementById('pause-btn').textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+
+            if (!isPaused) {
+                lastTime = performance.now();
+                animate();
+            }
+        }
+
+        function simulationFinished() {
+            isRunning = false;
+            isPaused = false;
+
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+
+            setControlsEnabled(true);
+
+            document.getElementById('run-btn').disabled = false;
+            document.getElementById('pause-btn').disabled = true;
+            document.getElementById('pause-btn').textContent = '⏸ Pause';
+        }
+
+        function resetSimulation() {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+
+            isRunning = false;
+            isPaused = false;
+            simTime = 0;
+            settlementCounter = 0;
+
+            removeClothMesh();
+            removeObstaclePoints();
+            cloth = null;
+
+            document.getElementById('squares-slider').value = 2;
+            document.getElementById('points-slider').value = 3;
+            document.getElementById('roughness-slider').value = 50;
+            document.getElementById('fps-slider').value = 60;
+            document.getElementById('gravity-slider').value = 2;
+
+            updateSliderDisplays();
+            setControlsEnabled(true);
+
+            document.getElementById('run-btn').disabled = false;
+            document.getElementById('pause-btn').disabled = true;
+            document.getElementById('pause-btn').textContent = '⏸ Pause';
+
+            renderer.render(scene, camera);
+        }
+
+        function setControlsEnabled(enabled) {
+            document.getElementById('squares-slider').disabled = !enabled;
+            document.getElementById('points-slider').disabled = !enabled;
+            document.getElementById('roughness-slider').disabled = !enabled;
+            document.getElementById('fps-slider').disabled = !enabled;
+            document.getElementById('gravity-slider').disabled = !enabled;
+        }
+
+        // ==================== ANIMATION LOOP ====================
+        function animate() {
+            if (!isRunning || isPaused) return;
+
+            animationId = requestAnimationFrame(animate);
+
+            const currentTime = performance.now();
+            const targetFps = parseInt(document.getElementById('fps-slider').value);
+            const frameInterval = 1000 / targetFps;
+
+            if (currentTime - lastTime >= frameInterval) {
+                const dt = Math.min((currentTime - lastTime) / 1000, 0.05);
+                lastTime = currentTime;
+
+                const gravity = parseFloat(document.getElementById('gravity-slider').value);
+                const roughness = parseFloat(document.getElementById('roughness-slider').value);
+
+                const totalMovement = cloth.simulate(dt, gravity, obstaclePoints, roughness);
+
+                updateClothMesh();
+
+                simTime += dt;
+
+                // Check for settlement
+                if (totalMovement < CONFIG.settlementThreshold) {
+                    settlementCounter++;
+                    if (settlementCounter >= CONFIG.settlementFrames) {
+                        simulationFinished();
+                        return;
+                    }
+                } else {
+                    settlementCounter = 0;
+                }
+
+                renderer.render(scene, camera);
+            }
+        }
+
+        // ==================== UI CONTROLS ====================
+        function updateSliderDisplays() {
+            const squares = document.getElementById('squares-slider').value;
+            const total = squares * squares;
+            document.getElementById('squares-value').textContent = `${squares} (${total} total squares)`;
+
+            document.getElementById('points-value').textContent =
+                document.getElementById('points-slider').value;
+
+            const roughness = document.getElementById('roughness-slider').value;
+            let gripText = 'Medium grip';
+            if (roughness < 20) gripText = 'Ice-like (slippery)';
+            else if (roughness < 40) gripText = 'Low grip';
+            else if (roughness > 80) gripText = 'Maximum grip';
+            else if (roughness > 60) gripText = 'High grip';
+            document.getElementById('roughness-value').textContent = `${roughness}% (${gripText})`;
+
+            document.getElementById('fps-value').textContent =
+                `${document.getElementById('fps-slider').value} FPS`;
+
+            document.getElementById('gravity-value').textContent =
+                `${parseFloat(document.getElementById('gravity-slider').value).toFixed(2)} m/s²`;
+        }
+
+        // ==================== EVENT LISTENERS ====================
+        document.getElementById('run-btn').addEventListener('click', startSimulation);
+        document.getElementById('pause-btn').addEventListener('click', pauseSimulation);
+        document.getElementById('reset-btn').addEventListener('click', resetSimulation);
+
+        ['squares-slider', 'points-slider', 'roughness-slider', 'fps-slider', 'gravity-slider'].forEach(id => {
+            document.getElementById(id).addEventListener('input', updateSliderDisplays);
+        });
+
+        // ==================== INITIALIZATION ====================
+        function init() {
+            initThreeJS();
+            updateSliderDisplays();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
